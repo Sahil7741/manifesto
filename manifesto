@@ -1,5 +1,6 @@
 #!/usr/bin/env python
 
+# COPYRIGHT (c) 2019-2020 Friedt Professional Engineering Services, Inc
 # Copyright (c) 2015-2016 Google, Inc.
 # Copyright (c) 2015 Linaro, Ltd.
 # All rights reserved.
@@ -89,8 +90,9 @@ class Manifest(object):
     def __add_desc(self, desc):
         self.descriptors.append(desc)
 
-    
     def add_interface_desc(self, desc):
+        assert self.interface_desc is None, \
+                "multiple instances of '{}'".format(self.instances.title)
         self.interface_desc = desc
         self.__add_desc(desc)
 
@@ -124,18 +126,36 @@ class Manifest(object):
         self.__add_desc_dict(self.cport_descs, desc)
         self.__add_desc(desc)
 
+    def __str__(self):
+        r = f"{self.header}"
+        if self.interface_desc:
+            r += f"\n{self.interface_desc}"
+        if self.mikrobus_desc:
+            r += f"\n{self.mikrobus_desc}"
+        for k in sorted(self.device_descs):
+            r += f"\n{self.device_descs[k]}"
+        for k in sorted(self.property_descs):
+            r += f"\n{self.property_descs[k]}"
+        for k in sorted(self.string_descs):
+            r += f"\n{self.string_descs[k]}"
+        for k in sorted(self.bundle_descs):
+            r += f"\n{self.bundle_descs[k]}"
+        for k in sorted(self.cport_descs):
+            r += f"\n{self.cport_descs[k]}"
+        return r.strip()
+
 class ManifestHeader(object):
-    MB_VERSION_MAJOR = 0
-    MB_VERSION_MINOR = 1
+    GB_VERSION_MAJOR = 0
+    GB_VERSION_MINOR = 1
 
     def __init__(self, major, minor):
-        if (major != ManifestHeader.MB_VERSION_MAJOR or
-                minor != ManifestHeader.MB_VERSION_MINOR):
+        if (major != ManifestHeader.GB_VERSION_MAJOR or
+                minor != ManifestHeader.GB_VERSION_MINOR):
             raise Error("invalid '[{}]' format version '{}.{}'"
                     "(only supports '{}.{}')".format(
                         MnfsParser.MNFS_HEADER, major, minor,
-                        ManifestHeader.MB_VERSION_MAJOR,
-                        ManifestHeader.MB_VERSION_MINOR))
+                        ManifestHeader.GB_VERSION_MAJOR,
+                        ManifestHeader.GB_VERSION_MINOR))
         self.major = major
         self.minor = minor
 
@@ -159,7 +179,7 @@ class InterfaceDescriptor(Descriptor):
     def __str__(self):
         r = "[{}]\n".format(MnfsParser.INTERFACE_DESC)
         r += "vendor-string-id = {:#x}\n".format(self.vsid)
-        r += "vendor-product-id = {:#x}\n".format(self.psid)
+        r += "product-string-id = {:#x}\n".format(self.psid)
         return r
 
 class MikrobusDescriptor(Descriptor):
@@ -216,6 +236,11 @@ class StringDescriptor(Descriptor):
 
     def __str__(self):
         r = ""
+        if self._parent is not None:
+            if self.id_ == self.parent.vsid:
+                r += "; Interface vendor string\n"
+            elif self.id_ == self.parent.psid:
+                r += "; Interface product string\n"
         r += "[{} {:#x}]\n".format(MnfsParser.STRING_DESC, self.id_)
         r += "string = {}\n".format(self.string)
         return r
@@ -335,11 +360,10 @@ class CPortDescriptor(Descriptor):
         return self.protocol_data[1]
 
     def __str__(self):
-        r = "; '{}' protocol on CPort {}\n".format(self.protocol_name,
-                self.id_)
-        r += "[{} {:#x}]\n".format(MnfsParser.CPORT_DESC, self.id_)
-        r += "bundle = {:#x}\n".format(self.bundle)
-        r += "protocol = {:#x}\n".format(self.protocol_num)
+        r = f"; '{self.protocol_name}' protocol on CPort {self.id_}\n"
+        r += f"[{MnfsParser.CPORT_DESC} {self.id_:#x}]\n"
+        r += f"bundle = {self.bundle:#x}\n"
+        r += f"protocol = {self.protocol_num:#x}\n"
         return r
 
 class PropertyDescriptor(Descriptor):
@@ -369,7 +393,7 @@ class PropertyDescriptor(Descriptor):
         r += "[{} {:#x}]\n".format(MnfsParser.PROPERTY_DESC, self.id_)
         r += "name-string-id = {}\n".format(self.name_stringid)
         r += "type = {}\n".format(self.typ)
-        r += "value = {}\n".format(self.value)
+        r += "value = <{}>\n".format(str(self.value).replace('[','').replace(']','').replace(',',''))
         return r
 
 class DeviceDescriptor(Descriptor):
@@ -390,7 +414,7 @@ class DeviceDescriptor(Descriptor):
         self.clock_link = props[10]
 
     def __str__(self):
-        r += "[{} {:#x}]\n".format(MnfsParser.DEVICE_DESC, self.id_)
+        r = "[{} {:#x}]\n".format(MnfsParser.DEVICE_DESC, self.id_)
         r += "driver-string-id = {:#x}\n".format(self.driver_string_id)
         r += "protocol = {:#x}\n".format(self.protocol)
         r += "reg = {:#x}\n".format(self.reg)
@@ -483,46 +507,38 @@ class MnfsParser(object):
             raise Error("invalid id value in '[{}]': {}"
                     .format(section, str(e)))
 
-    def __get_option(self, cfg_parser, section, option_name):
+    def __get_option(self, parser, section, option_name):
         try:
-            return cfg_parser.get(section, option_name)
+            return parser.get(section, option_name)
         except configparser.NoOptionError as e:
-            raise Error("missing field '{}' in '[{}]'".format(option_name,
-                section))
-    
-    def __check_option(self, cfg_parser, section, option_name):
-        try:
-            return cfg_parser.has_option(section, option_name)
-        except configparser.NoOptionError as e:
-            raise Error("failed to check field '{}' in '[{}]'".format(option_name,
-                section))
+            raise Error("missing field '{}' in '[{}]'".format(option_name, section))
 
-    def __get_int_option(self, cfg_parser, section, option_name, num_bytes):
+    def __check_option(self, parser, section, option_name):
         try:
-            str_opt = self.__get_option(cfg_parser, section, option_name)
-            int_opt =  int(str_opt, base=0)
+            return parser.has_option(section, option_name)
+        except configparser.NoOptionError:
+            return False
+
+    def __get_int_option(self, parser, section, option_name, num_bytes):
+        try:
+            str_opt = self.__get_option(parser, section, option_name)
+            int_opt = int(str_opt, base=0)
             return self.__check_int(int_opt, num_bytes)
         except ValueError as e:
-            raise Error("invalid value '{}' for field '{}' in '[{}]': {}"
-                    .format(int_opt, option_name, section, str(e)))
+            raise Error("invalid value '{}' for field '{}' in '[{}]': {}".format(str_opt, option_name, section, str(e)))
 
-    def __get_str_option(self, cfg_parser, section, option_name, max_):
-        str_opt = self.__get_option(cfg_parser, section, option_name)
+    def __get_str_option(self, parser, section, option_name, max_):
+        str_opt = self.__get_option(parser, section, option_name)
         if len(str_opt) > max_:
-            raise Error("string '{}' for field '{}' in '[{}]' "
-            "is too long (maximum is {})".format(str_opt, option_name, section,
-                max_))
+            raise Error("string '{}' for field '{}' in '[{}]' is too long (maximum is {})".format(str_opt, option_name, section, max_))
         return str_opt
-    
-    def __get_arr_option(self, cfg_parser, section, option_name, max_, typ):
-        arr_opt = self.__get_option(cfg_parser, section, option_name)
+
+    def __get_arr_option(self, parser, section, option_name, max_, typ):
+        arr_opt = self.__get_option(parser, section, option_name)
         if len(arr_opt) > max_:
-            raise Error("arr '{}' for field '{}' in '[{}]' "
-            "is too long (maximum is {})".format(arr_opt, option_name, section,
-                max_)) 
+            raise Error("arr '{}' for field '{}' in '[{}]' is too long (maximum is {})".format(arr_opt, option_name, section, max_))
         if not (arr_opt[0] == '<' and arr_opt[-1] == '>'):
-            raise Error("arr '{}' for field '{}' in '[{}]' "
-            "does not start with < or end with >".format(arr_opt, option_name, section))
+            raise Error("arr '{}' for field '{}' in '[{}]' does not start with < or end with >".format(arr_opt, option_name, section))
         val = list(map(int, (arr_opt[1:(len(arr_opt)-1)]).split()))
         for values in val:
             self.__check_int(values, MnfbGenerator.PROP_VALUE_SIZE[typ])
@@ -530,34 +546,34 @@ class MnfsParser(object):
 
     def parse_file(self, mnfs_file):
         # force an OrderedDict to get deterministic output even on Python 2.6.
-        cfg_parser = configparser.ConfigParser(dict_type=collections.OrderedDict)
+        self.parser = configparser.ConfigParser(dict_type=collections.OrderedDict)
 
         with open(mnfs_file, 'r') as f:
-            cfg_parser.readfp(f)
+            self.parser.read_file(f)
 
         manifest = Manifest()
 
         # the error reporting in this function is purely syntaxical
 
-        for section in cfg_parser.sections():
+        for section in self.parser.sections():
             if section != section.strip():
                 raise Error("invalid spaces in '[{}]'".format(section))
 
             if section == MnfsParser.MNFS_HEADER:
-                vmaj = self.__get_int_option(cfg_parser, section,
+                vmaj = self.__get_int_option(self.parser, section,
                         MnfsParser.MNFS_HEADER_VMAJ,
                         MnfsParser.MNFS_HEADER_VERSION_SIZE)
-                vmin = self.__get_int_option(cfg_parser, section,
+                vmin = self.__get_int_option(self.parser, section,
                         MnfsParser.MNFS_HEADER_VMIN,
                         MnfsParser.MNFS_HEADER_VERSION_SIZE)
                 header = ManifestHeader(vmaj, vmin)
                 manifest.add_header(header)
 
             elif section == MnfsParser.INTERFACE_DESC:
-                vsid = self.__get_int_option(cfg_parser, section,
+                vsid = self.__get_int_option(self.parser, section,
                         MnfsParser.INTERFACE_DESC_VSID,
                         MnfsParser.ID_DESC_SIZE)
-                psid = self.__get_int_option(cfg_parser, section,
+                psid = self.__get_int_option(self.parser, section,
                         MnfsParser.INTERFACE_DESC_PSID,
                         MnfsParser.ID_DESC_SIZE)
 
@@ -565,40 +581,40 @@ class MnfsParser(object):
                 manifest.add_interface_desc(interface)
             
             elif section == MnfsParser.MIKROBUS_DESC:
-                pwm = self.__get_int_option(cfg_parser, section,
+                pwm = self.__get_int_option(self.parser, section,
                         MnfsParser.MNFS_MIKROBUS_PWM_STATE,
                         MnfsParser.ID_DESC_SIZE)
-                _int = self.__get_int_option(cfg_parser, section,
+                _int = self.__get_int_option(self.parser, section,
                         MnfsParser.MNFS_MIKROBUS_INT_STATE,
                         MnfsParser.ID_DESC_SIZE)
-                rx = self.__get_int_option(cfg_parser, section,
+                rx = self.__get_int_option(self.parser, section,
                         MnfsParser.MNFS_MIKROBUS_RX_STATE,
                         MnfsParser.ID_DESC_SIZE)
-                tx = self.__get_int_option(cfg_parser, section,
+                tx = self.__get_int_option(self.parser, section,
                         MnfsParser.MNFS_MIKROBUS_TX_STATE,
                         MnfsParser.ID_DESC_SIZE)
-                scl = self.__get_int_option(cfg_parser, section,
+                scl = self.__get_int_option(self.parser, section,
                         MnfsParser.MNFS_MIKROBUS_SCL_STATE,
                         MnfsParser.ID_DESC_SIZE)
-                sda = self.__get_int_option(cfg_parser, section,
+                sda = self.__get_int_option(self.parser, section,
                         MnfsParser.MNFS_MIKROBUS_SDA_STATE,
                         MnfsParser.ID_DESC_SIZE)
-                mosi = self.__get_int_option(cfg_parser, section,
+                mosi = self.__get_int_option(self.parser, section,
                         MnfsParser.MNFS_MIKROBUS_MOSI_STATE,
                         MnfsParser.ID_DESC_SIZE)
-                miso = self.__get_int_option(cfg_parser, section,
+                miso = self.__get_int_option(self.parser, section,
                         MnfsParser.MNFS_MIKROBUS_MISO_STATE,
                         MnfsParser.ID_DESC_SIZE)
-                sck = self.__get_int_option(cfg_parser, section,
+                sck = self.__get_int_option(self.parser, section,
                         MnfsParser.MNFS_MIKROBUS_SCK_STATE,
                         MnfsParser.ID_DESC_SIZE)
-                cs = self.__get_int_option(cfg_parser, section,
+                cs = self.__get_int_option(self.parser, section,
                         MnfsParser.MNFS_MIKROBUS_CS_STATE,
                         MnfsParser.ID_DESC_SIZE)
-                rst = self.__get_int_option(cfg_parser, section,
+                rst = self.__get_int_option(self.parser, section,
                         MnfsParser.MNFS_MIKROBUS_RST_STATE,
                         MnfsParser.ID_DESC_SIZE)
-                an = self.__get_int_option(cfg_parser, section,
+                an = self.__get_int_option(self.parser, section,
                         MnfsParser.MNFS_MIKROBUS_AN_STATE,
                         MnfsParser.ID_DESC_SIZE)
                 mikrobus = MikrobusDescriptor(pwm, _int, rx, tx, scl, \
@@ -607,7 +623,7 @@ class MnfsParser(object):
 
             elif section.split()[0] == MnfsParser.STRING_DESC:
                 id_ = self.__parse_id(section, MnfsParser.ID_DESC_SIZE)
-                str_ = self.__get_str_option(cfg_parser, section,
+                str_ = self.__get_str_option(self.parser, section,
                         MnfsParser.STRING_DESC_STRING,
                         MnfsParser.STRING_DESC_STRING_SIZE)
 
@@ -616,13 +632,13 @@ class MnfsParser(object):
             
             elif section.split()[0] == MnfsParser.PROPERTY_DESC:
                 id_ = self.__parse_id(section, MnfsParser.ID_DESC_SIZE)
-                name_stringid = self.__get_int_option(cfg_parser, section,
+                name_stringid = self.__get_int_option(self.parser, section,
                         MnfsParser.PROPERTY_DESC_NAME_STRING_ID,
                         MnfsParser.ID_DESC_SIZE)
-                typ = self.__get_int_option(cfg_parser, section,
+                typ = self.__get_int_option(self.parser, section,
                         MnfsParser.PROPERTY_DESC_TYPE,
                         MnfsParser.ID_DESC_SIZE)
-                value = self.__get_arr_option(cfg_parser, section,
+                value = self.__get_arr_option(self.parser, section,
                         MnfsParser.PROPERTY_DESC_VALUE,
                         MnfsParser.PROP_DESC_VALUE_SIZE, typ)
                 prop = PropertyDescriptor(id_, name_stringid, typ, value, section)
@@ -630,7 +646,7 @@ class MnfsParser(object):
             
             elif section.split()[0] == MnfsParser.BUNDLE_DESC:
                 id_ = self.__parse_id(section, MnfsParser.ID_DESC_SIZE)
-                class_ = self.__get_int_option(cfg_parser, section,
+                class_ = self.__get_int_option(self.parser, section,
                         MnfsParser.BUNDLE_DESC_CLASS,
                         MnfsParser.BUNDLE_DESC_CLASS_SIZE)
 
@@ -638,76 +654,71 @@ class MnfsParser(object):
                 manifest.add_bundle_desc(bundle)
 
             elif section.split()[0] == MnfsParser.CPORT_DESC:
-                id_ = self.__parse_id(section, MnfsParser.CPORT_ID_DESC_SIZE)
-                bundle = self.__get_int_option(cfg_parser, section,
-                        MnfsParser.CPORT_DESC_BUNDLE,
-                        MnfsParser.ID_DESC_SIZE)
-                protocol = self.__get_int_option(cfg_parser, section,
-                        MnfsParser.CPORT_DESC_PROTOCOL,
-                        MnfsParser.CPORT_DESC_PROTOCOL_SIZE)
-
-                cport = CPortDescriptor(id_, bundle, protocol, section)
+                cport_id = int(section.split()[1], 0)
+                bundle = int(self.parser.get(section, "bundle"), 0)
+                protocol = int(self.parser.get(section, "protocol"), 0)
+                cport = CPortDescriptor(cport_id, bundle, protocol, section)
                 manifest.add_cport_desc(cport)
 
             elif section.split()[0] == MnfsParser.DEVICE_DESC:
                 id_ = self.__parse_id(section, MnfsParser.ID_DESC_SIZE)
-                driverstr = self.__get_int_option(cfg_parser, section,
+                driverstr = self.__get_int_option(self.parser, section,
                         MnfsParser.DEVICE_DESC_DRIVER_STRING_ID,
                         MnfsParser.ID_DESC_SIZE)
-                protocol = self.__get_int_option(cfg_parser, section,
+                protocol = self.__get_int_option(self.parser, section,
                         MnfsParser.DEVICE_DESC_PROTOCOL,
                         MnfsParser.ID_DESC_SIZE)
                 if protocol == 11:
-                    maxspeedhz = self.__get_int_option(cfg_parser, section,
+                    maxspeedhz = self.__get_int_option(self.parser, section,
                             MnfsParser.DEVICE_DESC_MAX_SPEED_HZ,
                             MnfsParser.MAX_SPEED_DESC_SIZE)
-                    mode = self.__get_int_option(cfg_parser, section,
+                    mode = self.__get_int_option(self.parser, section,
                             MnfsParser.DEVICE_DESC_MODE,
                             MnfsParser.ID_DESC_SIZE)
                 else:
                     maxspeedhz=0
                     mode=0
                 if protocol != 4:
-                    reg = self.__get_int_option(cfg_parser, section,
+                    reg = self.__get_int_option(self.parser, section,
                             MnfsParser.DEVICE_DESC_REG,
                             MnfsParser.ID_DESC_SIZE)
                 else:
                     reg = 0
-                if (self.__check_option(cfg_parser, section,
+                if (self.__check_option(self.parser, section,
                         MnfsParser.DEVICE_DESC_IRQ)):
-                    irq = self.__get_int_option(cfg_parser, section,
+                    irq = self.__get_int_option(self.parser, section,
                             MnfsParser.DEVICE_DESC_IRQ,
                             MnfsParser.ID_DESC_SIZE)
-                    irq_type = self.__get_int_option(cfg_parser, section,
+                    irq_type = self.__get_int_option(self.parser, section,
                             MnfsParser.DEVICE_DESC_IRQ_TYPE,
                             MnfsParser.ID_DESC_SIZE)
                 else:
                     irq= 0
                     irq_type= 0
-                if (self.__check_option(cfg_parser, section,
+                if (self.__check_option(self.parser, section,
                         MnfsParser.DEVICE_DESC_PROP_LINK)):      
-                    prop_link = self.__get_int_option(cfg_parser, section,
+                    prop_link = self.__get_int_option(self.parser, section,
                             MnfsParser.DEVICE_DESC_PROP_LINK,
                             MnfsParser.ID_DESC_SIZE)
                 else:
                     prop_link = 0
-                if (self.__check_option(cfg_parser, section,
+                if (self.__check_option(self.parser, section,
                         MnfsParser.DEVICE_DESC_GPIO_LINK)):   
-                    gpio_link = self.__get_int_option(cfg_parser, section,
+                    gpio_link = self.__get_int_option(self.parser, section,
                             MnfsParser.DEVICE_DESC_GPIO_LINK,
                             MnfsParser.ID_DESC_SIZE)
                 else:
                     gpio_link = 0
-                if (self.__check_option(cfg_parser, section,
+                if (self.__check_option(self.parser, section,
                         MnfsParser.DEVICE_DESC_REG_LINK)):   
-                    reg_link = self.__get_int_option(cfg_parser, section,
+                    reg_link = self.__get_int_option(self.parser, section,
                             MnfsParser.DEVICE_DESC_REG_LINK,
                             MnfsParser.ID_DESC_SIZE)
                 else:
                     reg_link = 0
-                if (self.__check_option(cfg_parser, section,
+                if (self.__check_option(self.parser, section,
                         MnfsParser.DEVICE_DESC_CLOCK_LINK)):   
-                    clock_link = self.__get_int_option(cfg_parser, section,
+                    clock_link = self.__get_int_option(self.parser, section,
                             MnfsParser.DEVICE_DESC_CLOCK_LINK,
                             MnfsParser.ID_DESC_SIZE)
                 else:
@@ -718,6 +729,91 @@ class MnfsParser(object):
                 manifest.add_device_desc(device)
             else:
                 raise Error("invalid descriptor '[{}]'".format(section))
+
+        return manifest
+
+class MnfbParser(object):
+
+    def __init__(self):
+        self._mnfb_data = []
+        pass
+
+    def parse_file(self, mnfb_file):
+        manifest = Manifest()
+
+        offset = 0
+
+        with open(mnfb_file, 'r') as f:
+            self._mnfb_data = bytearray(f.read())
+
+        mnfb_header = struct.unpack_from(MnfbGenerator.MNFS_HEADER_FMT, self._mnfb_data, offset)
+
+        if len(self._mnfb_data) != mnfb_header[0]:
+            raise Error("mnfb length mismatch: expected: {} actual: {}").format(len(self._mnfb_data), mnfb_header[0])
+
+        remaining = len(self._mnfb_data)
+
+        manifest.add_header(ManifestHeader(mnfb_header[1], mnfb_header[2]))
+        offset += MnfbGenerator.MNFS_HEADER_SIZE
+        remaining -= MnfbGenerator.MNFS_HEADER_SIZE
+
+        while offset < len(self._mnfb_data):
+            desc = struct.unpack_from(MnfbGenerator.BASE_DESC_FMT, self._mnfb_data, offset)
+
+            desc_size = desc[0]
+            desc_type = desc[1]
+
+            if desc_size > remaining:
+                raise Error("desc size: {} remaining: {}").format(desc_size, remaining)
+
+            if desc_type == MnfbGenerator.INTERFACE_DESC_TYPE:
+
+                if desc_size != MnfbGenerator.INTERFACE_DESC_SIZE:
+                    raise Error("desc size: expected: {} actual: {}").format(desc_size, MnfbGenerator.INTERFACE_DESC_SIZE)
+
+                desc = struct.unpack_from(MnfbGenerator.INTERFACE_DESC_FMT, self._mnfb_data, offset)
+                manifest.add_interface_desc(InterfaceDescriptor(desc[2], desc[3], None))
+
+            elif desc_type == MnfbGenerator.STRING_DESC_TYPE:
+
+                if desc_size > MnfbGenerator.STRING_DESC_MAX_SIZE:
+                    raise Error("unsupported string descriptor size: {}").format(desc_size)
+
+                desc = struct.unpack_from(MnfbGenerator.STRING_DESC_BASE_FMT, self._mnfb_data, offset)
+                string_size = desc[2]
+
+                if string_size > MnfbGenerator.STRING_MAX_SIZE:
+                    raise Error("unsupported string size: {}").format(string_size)
+
+                if string_size + MnfbGenerator.STRING_DESC_BASE_SIZE > desc_size:
+                    raise Error("invalid string size: {}").format(string_size)
+
+                string_fmt = "{}s".format(string_size)
+                string_value = struct.unpack_from(string_fmt, self._mnfb_data, offset + MnfbGenerator.STRING_DESC_BASE_SIZE)[0]
+
+                manifest.add_string_desc(StringDescriptor(desc[3], string_value, None))
+
+            elif desc_type == MnfbGenerator.BUNDLE_DESC_TYPE:
+
+                if desc_size != MnfbGenerator.BUNDLE_DESC_SIZE:
+                    raise Error("desc size: expected: {} actual: {}").format(desc_size, MnfbGenerator.BUNDLE_DESC_SIZE)
+
+                desc = struct.unpack_from(MnfbGenerator.BUNDLE_DESC_FMT, self._mnfb_data, offset)
+                manifest.add_bundle_desc(BundleDescriptor(desc[2], desc[3], None))
+
+            elif desc_type == MnfbGenerator.CPORT_DESC_TYPE:
+
+                if desc_size != MnfbGenerator.CPORT_DESC_SIZE:
+                    raise Error("desc size: expected: {} actual: {}").format(desc_size, MnfbGenerator.CPORT_DESC_SIZE)
+
+                desc = struct.unpack_from(MnfbGenerator.CPORT_DESC_FMT, self._mnfb_data, offset)
+                manifest.add_cport_desc(CPortDescriptor(desc[3], desc[2], desc[4], None))
+
+            else:
+                raise Error("unrecognized descriptor type {}").format(desc_type)
+
+            offset += desc_size
+            remaining -= desc_size
 
         return manifest
 
@@ -916,24 +1012,54 @@ class MnfbGenerator(object):
 def get_args():
     parser = argparse.ArgumentParser()
 
-    parser.add_argument('-i','--infile',
-            help='specify an input manifest file', required=True)
-    parser.add_argument('-o', '--outfile',
-            help='specify an output file path', required=False)
+    parser.add_argument('infile',
+            help='specify an input manifest file')
+
+    parser.add_argument('-I', '--in-format', default='mnfs',
+            choices=['mnfs', 'mnfb'],
+            help='input formats (default is mnfs)')
+
+    parser.add_argument('-o', '--out', default='stdout',
+            help='output file (default is stdout)')
+
+    parser.add_argument('-O', '--out-format', default='mnfb',
+            choices=['mnfs', 'mnfb'],
+            help='output formats (default is mnfb)')
+
+    parser.add_argument('-s', '--silent', action='store_true',
+            help='silence the (potentially relevant) warnings')
 
     return parser.parse_args()
 
+### Main
 def main():
+    # parse command line arguments
     args = get_args()
-    warnings.silent = False   
-    parser = MnfsParser()
-    manifest = parser.parse_file(args.infile)
-    mnfb_gen = MnfbGenerator()
-    mnfb_gen.generate(manifest)
-    if(args.outfile):
-        mnfb_gen.write_file(args.outfile)
+    warnings.silent = args.silent
+
+    # get input parser
+    if args.in_format == "mnfs":
+        parser = MnfsParser()
     else:
-        mnfb_gen.write_file((args.infile).replace(".mnfs", ".mnfb"))
+        parser = MnfbParser()
+
+    # get a manifest from the file
+    manifest = parser.parse_file(args.infile)
+
+    # check the manifest
+    #manifest.auto_check()
+
+    # generate output
+    if args.out_format == "mnfs":
+        if args.out == "stdout":
+            print(manifest, end='')
+        else:
+            with open(args.out, 'w') as f:
+                f.write(str(manifest))
+    else:
+        mnfb_gen = MnfbGenerator()
+        mnfb_gen.generate(manifest)
+        mnfb_gen.write_file(args.out)
 
 if __name__ == "__main__":
     try:
